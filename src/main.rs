@@ -7,14 +7,14 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{ AsyncReadExt, AsyncWriteExt };
 
 const BROAD_CAST_ADDRESS: &str = "255.255.255.255:8888";
-const TCP_PORT: u16 = 9000;
+const TCP_PORT: u16 = 9001;
 
 #[derive(Debug, Serialize, Deserialize)]
 enum Message {
     HandShake { node_name: String, tcp_addr: SocketAddr },
     Greeting,
-    HeartBeat, 
-    HeartBeatResponse,
+    HeartBeat { node_name: String, tcp_addr: SocketAddr }, 
+    HeartBeatResponse { node_name: String, tcp_addr: SocketAddr },
     HeartBeatResp,
     SetValue { key: String, value: String },
     GetValue { key: String },
@@ -59,7 +59,7 @@ fn get_mac_addr() -> Result<String, MacAddressError> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-   let local_addr: SocketAddr = "0.0.0.0:8888".parse()?;
+   let local_addr: SocketAddr = "0.0.0.0:8889".parse()?;
    let socket = UdpSocket::bind(&local_addr).await?;
    socket.set_broadcast(true)?;
 
@@ -110,6 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
    let mut buf = vec![0u8; 1024];
    loop {
+    let nodes_clone_v2 = nodes.clone();
      let (len , addr) = socket.recv_from(&mut buf).await?;
      println!("Received data on UDP from {}", addr);
      let received_msg: Message = serde_json::from_slice(&buf[..len])?;
@@ -117,24 +118,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
      let local_node_name = get_mac_addr()?;
      if let Message::HandShake { node_name, tcp_addr } = received_msg {
 
-        if local_node_name == node_name {
+        if node_name == local_node_name && tcp_addr == format!("{}:{}", "0.0.0.0", TCP_PORT).parse().unwrap() {
             continue;
         }
+        let mut new_node = true;
         println!("Received handshake from: {}", node_name);
         {
             let mut nodes_guard = nodes.write().await;
-            nodes_guard.insert(node_name, NodeInfo{ tcp_addr, last_seen: std::time::Instant::now() });
+            if let Some(_) = nodes_guard.get(&node_name) {
+                new_node = false;
+            } else {
+                println!("Its  not a new node");
+            }
+            nodes_guard.insert(node_name.clone(), NodeInfo{ tcp_addr, last_seen: std::time::Instant::now() });
         }
 
         let greeting = Message::Greeting;
         let serialized_greeting = serde_json::to_string(&greeting).unwrap();
         let _ = socket.send_to(serialized_greeting.as_bytes(), &addr).await;
+
+        if new_node == false {
+            println!("same node arrives again");
+            continue;
+        }
+
         tokio::spawn(async move {
             loop {
+                {
+                let nodes_clone = nodes_clone_v2.clone();
+                let nodes_guard = nodes_clone.read().await;
+                match get_mac_addr() {
+                    Ok(node_name) => {
+                        if let Some(node_info) = nodes_guard.get(&node_name) {
+                            if node_info.last_seen.elapsed().as_secs() > 600 {
+                                break; // Break the loop if last_seen is 10 minutes ago
+                            }
+                        }
+
+                    }
+                    Err(_e) => { break; }
+                }
+               }
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 println!("Sending heartbeat to {}", tcp_addr);
                 let mut stream = TcpStream::connect(tcp_addr).await.unwrap();
-                let heartbeat_msg = Message::HeartBeat;
+                let heartbeat_msg = Message::HeartBeat { tcp_addr, node_name: node_name.clone() };
                 let serialized_msg = serde_json::to_string(&heartbeat_msg).unwrap();
                 stream.write_all(serialized_msg.as_bytes()).await.unwrap();
             }
@@ -147,12 +175,14 @@ async fn handle_tcp_stream(mut stream: TcpStream, nodes: Arc<RwLock<HashMap<Stri
     let mut buf = vec![0u8; 1024];
     let len = stream.read(&mut buf).await.unwrap();
     let received_msg: Message = serde_json::from_slice(&buf[..len]).unwrap();
+    println!("recievied messages are {:?}", received_msg);
     match received_msg {
-        Message::HeartBeat => {
+        Message::HeartBeat { node_name, tcp_addr }=> {
             println!("Received Heartbeat");
-            let response = Message::HeartBeatResponse;
-            let serialized_response = serde_json::to_string(&response).unwrap();
-            stream.write_all(serialized_response.as_bytes()).await.unwrap();
+            {
+            let mut nodes_guard = nodes.write().await;
+            nodes_guard.insert(node_name, NodeInfo{ tcp_addr, last_seen: std::time::Instant::now() });
+            }
         }
         Message::SetValue { key, value } => {
             println!("Received SetValue");
@@ -181,6 +211,13 @@ async fn handle_tcp_stream(mut stream: TcpStream, nodes: Arc<RwLock<HashMap<Stri
         Message::Sync { key, value } => {
             println!("Received Sync");
             store.set(key, value).await;
+        }
+        Message::HeartBeatResponse { node_name, tcp_addr } => {
+            println!("Received HearbeatResponse");
+            {
+             let mut nodes_guard = nodes.write().await;
+             nodes_guard.insert(node_name, NodeInfo{ tcp_addr, last_seen: std::time::Instant::now() });
+            }
         }
         _ => {}
 
