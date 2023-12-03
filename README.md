@@ -16,3 +16,21 @@ A simple powerful peer to peer key value database implemented in rust. This proj
 
 ### How to Use
 
+Clone repository:
+
+git clone git@github.com:ankitsheoran1/p2pkvdb.git
+
+cd p2pkvdb
+cargo run 
+
+cd cliInterface
+cargo build --release
+./target/release/cliInterface set   --node 0.0.0.0:9000 <key> <value>
+./target/release/cliInterface set   --node 0.0.0.0:9000 <key>
+
+
+## Need To Do - 
+Currently its only supporting String type key and value , need to make generic
+Currently its only in-memory , need to implement storage 
+Need to explore how actaully broadcast a UDP to all nodes ina network or there any better way 
+
